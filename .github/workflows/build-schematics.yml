@@ -1,0 +1,42 @@
+name: Build Schematics
+
+on:
+  push:
+    paths:
+      - "docs/**/*.py"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install schemdraw
+
+      - name: Generate SVGs
+        run: |
+          find docs -name "*.py" | while read file; do
+            echo "Running $file"
+            python "$file"
+          done
+
+      - name: Commit generated SVGs
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto-generate schematics"
+          file_pattern: docs/*.svg
+          

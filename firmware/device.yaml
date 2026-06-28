@@ -1,0 +1,11 @@
+esphome:
+  name: example_device
+
+esp32:
+  board: esp32dev
+
+logger:
+
+api:
+
+ota:
