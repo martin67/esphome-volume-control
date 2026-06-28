@@ -1,6 +1,6 @@
-# ESPHome Project Template
+# ESPHome Volume Control
 
-Template for ESPHome-based hardware projects with:
+Device tht controls the voume of multiple media players.
 
 - ESPHome firmware
 - Schemdraw wiring diagrams

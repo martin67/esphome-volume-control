@@ -1,11 +1,440 @@
 esphome:
-  name: example_device
+  name: volymkontroll
+  friendly_name: Volymkontroll
 
-esp32:
-  board: esp32dev
+  on_boot:
+    priority: -10
+    then:
+      # Wait for Home Assistant API
+      - wait_until:
+          api.connected:
+      - delay: 2s
+      # Restore LCD backlight state
+      - lambda: |-
+          id(last_activity) = millis();
+      # Turn on LCD backlight
+      - lambda: |-
+          id(lcd_display).backlight();
+      # Sync selected player to Home Assistant
+      - script.execute: set_active_player
 
+esp8266:
+  board: nodemcuv2
+
+# Enable logging
 logger:
 
+# Enable Home Assistant API
 api:
-
+  encryption:
+    key: !secret volymkontroll__encryption_key
 ota:
+  - platform: esphome
+    password: !secret volymkontroll__ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  min_auth_mode: WPA2
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: Volymkontroll Fallback Hotspot
+    password: !secret volymkontroll__ap_password
+captive_portal:
+
+i2c:
+  sda: D2
+  scl: D1
+
+time:
+  - platform: homeassistant
+    id: my_time
+
+# Players
+substitutions:
+  player_0_name: "Bottenv\x02ning"
+  player_0_id: "media_player.bottenvaning"
+
+  player_1_name: "Arbetsrum"
+  player_1_id: "media_player.arbetsrum"
+
+  player_2_name: "Bibliotek"
+  player_2_id: "media_player.bibliotek"
+
+  player_3_name: "K\x01k"
+  player_3_id: "media_player.kok"
+
+  player_4_name: "Matsal"
+  player_4_id: "media_player.matsal"
+
+  player_5_name: "Musikrum"
+  player_5_id: "media_player.musikrum"
+
+  player_6_name: "Vardagsrum"
+  player_6_id: "media_player.vardagsrum"
+
+  player_count: "7"
+
+# -------------------
+# GLOBAL STATE
+# -------------------
+globals:
+  - id: mode
+    type: int
+    initial_value: "1" # 0 = select, 1 = volume
+
+  - id: player_index
+    type: int
+    initial_value: "0"
+
+  - id: volume
+    type: float
+    initial_value: "0.5"
+
+  - id: show_reset_message
+    type: bool
+    initial_value: "false"
+
+  - id: boot_complete
+    type: bool
+    initial_value: "false"
+
+  - id: startup_done
+    type: bool
+    initial_value: "false"
+
+  - id: last_activity
+    type: unsigned long
+    initial_value: "0"
+
+  - id: last_turn_ms
+    type: unsigned long
+    initial_value: "0"
+
+  - id: volume_dirty
+    type: bool
+    initial_value: "false"
+
+  - id: ignore_ha_volume_until
+    type: unsigned long
+    initial_value: "0"
+
+# -------------------
+# ROTARY ENCODER
+# -------------------
+sensor:
+  - platform: rotary_encoder
+    id: encoder
+    pin_a:
+      number: D6
+      mode:
+        input: true
+        pullup: true
+    pin_b:
+      number: D5
+      mode:
+        input: true
+        pullup: true
+    resolution: 1
+    filters:
+      - debounce: 20ms
+
+    on_clockwise:
+      then:
+        - lambda: |-
+            id(last_activity) = millis();
+            id(lcd_display).backlight();
+
+            if (id(mode) == 0) {
+              id(player_index)++;
+              if (id(player_index) >= ${player_count})
+                id(player_index) = 0;
+              id(set_active_player).execute();
+            } else {
+              unsigned long now = millis();
+              unsigned long delta = now - id(last_turn_ms);
+              id(last_turn_ms) = now;
+              float step = 0.01;
+              // acceleration
+              if (delta < 30)
+                step = 0.04;
+              else if (delta < 60)
+                step = 0.03;
+              else if (delta < 120)
+                step = 0.02;
+              else
+                step = 0.01;
+              id(volume) += step;
+
+              if (id(volume) > 1.0) id(volume) = 1.0;
+              id(ignore_ha_volume_until) = millis() + 1000;
+              id(volume_dirty) = true;
+            }
+
+    on_anticlockwise:
+      then:
+        - lambda: |-
+            id(last_activity) = millis();
+            id(lcd_display).backlight();
+
+            if (id(mode) == 0) {
+              id(player_index)--;
+              if (id(player_index) < 0) 
+                id(player_index) = ${player_count} -1;
+              id(set_active_player).execute();
+            } else {
+              unsigned long now = millis();
+              unsigned long delta = now - id(last_turn_ms);
+              id(last_turn_ms) = now;
+              float step = 0.01;
+              // acceleration
+              if (delta < 30)
+                step = 0.04;
+              else if (delta < 60)
+                step = 0.03;
+              else if (delta < 120)
+                step = 0.02;
+              else
+                step = 0.01;
+              id(volume) -= step;
+              if (id(volume) < 0.0) id(volume) = 0.0;
+              id(ignore_ha_volume_until) = millis() + 1000;
+              id(volume_dirty) = true;
+            }
+
+  #
+  - platform: homeassistant
+    id: ha_volume
+    entity_id: sensor.active_player_volume
+    on_value:
+      then:
+        - lambda: |-
+            if (millis() > id(ignore_ha_volume_until)) {
+              id(volume) = x;
+            }
+
+            // First successful HA communication
+            if (!id(startup_done)) {
+              id(startup_done) = true;
+              id(boot_complete) = true;
+            }
+
+binary_sensor:
+  - platform: gpio
+    id: button
+    pin:
+      number: D7
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    # single click - switch mode
+    on_click:
+      min_length: 10ms
+      max_length: 300ms
+      then:
+        - lambda: |-
+            id(last_activity) = millis();
+            id(lcd_display).backlight();
+            id(mode) = !id(mode);
+    # long press - reset voulme
+    on_multi_click:
+      - timing:
+          - ON for at least 1s
+        then:
+          - lambda: |-
+              id(last_activity) = millis();
+              id(lcd_display).backlight();
+          - script.execute: reset_all_volumes
+
+display:
+  - platform: lcd_pcf8574
+    id: lcd_display
+    dimensions: 16x2
+    address: 0x27
+    update_interval: 100ms
+
+    user_characters:
+      # ö
+      - position: 1
+        data:
+          - 0b01010
+          - 0b00000
+          - 0b01110
+          - 0b10001
+          - 0b10001
+          - 0b10001
+          - 0b01110
+          - 0b00000
+      # å
+      - position: 2
+        data:
+          - 0b00110
+          - 0b00000
+          - 0b01110
+          - 0b00001
+          - 0b01111
+          - 0b10001
+          - 0b01111
+          - 0b00000
+      # ä
+      - position: 3
+        data:
+          - 0b01010
+          - 0b00000
+          - 0b01110
+          - 0b00001
+          - 0b01111
+          - 0b10001
+          - 0b01111
+          - 0b00000
+
+    lambda: |-
+      const char* names[] = {
+        "${player_0_name}",
+         "${player_1_name}",
+         "${player_2_name}",
+         "${player_3_name}",
+         "${player_4_name}",
+         "${player_5_name}",
+         "${player_6_name}"
+      };
+
+      // BOOT SCREEN
+      if (!id(boot_complete)) {
+        it.print(0, 0, "Volymkontroll");
+        it.print(0, 1, "Startar...");
+        return;
+      }
+
+      // Reset message
+      if (id(show_reset_message)) {
+        it.print(0, 0, "Alla volymer");
+        it.print(0, 1, "\x03r nu 15%");
+        return;
+      }
+
+      // Player select
+      if (id(mode) == 0) {
+        it.print(0, 0, "V\x03lj rum");
+        it.print(0, 1, names[id(player_index)]);
+      } else {
+        it.print(0, 0, names[id(player_index)]);
+
+        char buf[16];
+        sprintf(buf, "%.0f%%", id(volume) * 100);
+        it.print(0, 1, buf);
+      }
+
+# -------------------
+# SCRIPTS
+# -------------------
+script:
+  - id: set_active_player
+    then:
+      - homeassistant.action:
+          action: input_select.select_option
+          data:
+            entity_id: input_select.active_media_player
+            option: !lambda |-
+              const char* player_ids[] = {
+                "${player_0_id}",
+                "${player_1_id}",
+                "${player_2_id}",
+                "${player_3_id}",
+                "${player_4_id}",
+                "${player_5_id}",
+                "${player_6_id}"
+              };
+              return player_ids[id(player_index)];
+
+  - id: set_volume
+    mode: restart
+    then:
+      # wait until turning stops
+      - delay: 250 ms
+      # send final value only
+      - homeassistant.action:
+          action: media_player.volume_set
+          data:
+            entity_id: !lambda |-
+              const char* player_ids[] = {
+                "${player_0_id}",
+                "${player_1_id}",
+                "${player_2_id}",
+                "${player_3_id}",
+                "${player_4_id}",
+                "${player_5_id}",
+                "${player_6_id}"
+              };
+              return player_ids[id(player_index)];
+            volume_level: !lambda "return id(volume);"
+
+  - id: reset_all_volumes
+    then:
+      - lambda: |-
+          id(show_reset_message) = true;
+
+      - homeassistant.action:
+          action: media_player.volume_set
+          data:
+            entity_id: ${player_1_id}
+            volume_level: "0.15"
+
+      - homeassistant.action:
+          action: media_player.volume_set
+          data:
+            entity_id: ${player_2_id}
+            volume_level: "0.15"
+
+      - homeassistant.action:
+          action: media_player.volume_set
+          data:
+            entity_id: ${player_3_id}
+            volume_level: "0.15"
+
+      - homeassistant.action:
+          action: media_player.volume_set
+          data:
+            entity_id: ${player_4_id}
+            volume_level: "0.15"
+
+      - homeassistant.action:
+          action: media_player.volume_set
+          data:
+            entity_id: ${player_5_id}
+            volume_level: "0.15"
+
+      - homeassistant.action:
+          action: media_player.volume_set
+          data:
+            entity_id: ${player_6_id}
+            volume_level: "0.15"
+
+      - delay: 2s
+
+      - lambda: |-
+          id(show_reset_message) = false;
+
+          // Return to default state
+          id(player_index) = 0;
+          id(mode) = 1;
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (millis() - id(last_activity) > 30000) {
+            id(lcd_display).no_backlight();
+          }
+
+  - interval: 250ms
+    then:
+      - if:
+          condition:
+            lambda: "return id(volume_dirty);"
+          then:
+            - lambda: |-
+                id(volume_dirty) = false;
+            - script.execute: set_volume
